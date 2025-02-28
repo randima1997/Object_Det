@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 import numpy as np
+from utils import *
 
 class EmptyLayer(nn.Module):
     def __init__(self):
@@ -14,6 +15,70 @@ class DetectionLayer(nn.Module):
     def __init__(self, anchors):
         super().__init__()
         self.anchors = anchors
+
+class Darknet(nn.Module):
+    def __init__(self, cfgfile):
+        super().__init__()
+        self.blocks = parse_cfg(cfgfile)
+        self.net_info, self.module_list = create_modules(self.blocks)
+
+
+    def forward(self, x, CUDA):
+        modules = self.blocks[1:]
+        outputs = {}                # Used to cache the outputs for easy access
+
+        write = 0
+        for i, module in enumerate(modules):
+            module_type = (module["type"])
+
+            if module_type == "convolutional" or module_type == "upsample":
+                x = self.module_list[i](x)          # Simple forward pass through module
+
+            elif module_type == "route":
+                layers = module["layers"].split(',')
+                layers = [int(a) for a in layers]
+
+                if (layers[0]>0):                   # In case the index is absolute instead of relative
+                    layers[0] = layers[0] - i
+
+                if len(layers) == 1:                # In case only one layers attr in mod
+                    x = outputs[i + layers[0]]
+
+                else:
+                    if layers[1] >0:
+                        layers[1] = layers[1] - i
+
+                    map1 = outputs[i + layers[0]]
+                    map2 = outputs[i + layers[1]]
+
+                    x = torch.cat((map1, map2), dim=1)      # Concatenate feature maps along depth
+
+            elif module_type == "shortcut":                 # Akin to skip connection. Add the outputs from a previous layer
+                from_ = int(module["from"])
+                x = outputs[i-1] + outputs[i+from_]
+
+            elif module_type == "yolo":
+
+                anchors = self.module_list[i][0].anchors
+                inp_dim = int(self.net_info["height"])
+                num_classes = int(module["classes"])
+
+                x = x.data
+                x = predict_transform(x, inp_dim, anchors, num_classes, CUDA)
+
+                if not write:
+                    detections = x
+                    write = 1
+
+                else:
+                    detections = torch.cat((detections, x), 1)
+
+            outputs[i] = x
+
+        return detections
+    
+
+
 
 def parse_cfg(cfgfile):
     """
@@ -166,3 +231,5 @@ def create_modules(blocks):
         output_filters.append(filters)
 
     return (net_info, module_list)
+
+
